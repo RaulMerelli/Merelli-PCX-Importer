@@ -1,8 +1,10 @@
-﻿using System;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
+using System.Linq;
+using System.Drawing.Imaging;
 
 namespace MerelliPCX
 {
@@ -13,7 +15,7 @@ namespace MerelliPCX
         /// </summary>
         DEFAULT = 10,
     }
-    public enum Version
+    public enum PCXVersion
     {
         /// <summary>
         /// Version 2.5 of PC Paintbrush
@@ -93,10 +95,33 @@ namespace MerelliPCX
         private int Ysize;
         private int Totalbytes;
         private int Linepaddingsize;
+        private int Bytesperfile;
         private byte[] FileArray;
         private bool palette16Empty;
         private bool palette256Empty;
         private Bitmap bmpImage;
+
+        protected virtual void Dispose(bool disposing)
+        {
+        }
+
+        public void Dispose()
+        {
+            // Dispose of unmanaged resources.
+            Dispose(true);
+            // Suppress finalization.
+            GC.SuppressFinalize(this);
+        }
+
+        public PaletteInfo PaletteInfo
+        {
+            get { return (PaletteInfo)this.Paletteinfo; }
+        }
+
+        public PCXVersion FileVersion
+        {
+            get { return (PCXVersion)this.Version; }
+        }
 
         /// <summary>
         /// Gets a Bitmap representation of the loaded file.
@@ -247,6 +272,12 @@ namespace MerelliPCX
                         Imagevalues.Add(runvalue);
                     }
                 } while (pos < FileArray.Length);
+                Bytesperfile = Imagevalues.Count();
+                //control effective bytes and theoric bytes
+                if (Bytesperfile == (Ysize * Bytesperline) + Bytesperline)
+                {
+                    Ysize++;
+                }
             }
             catch
             {
@@ -254,30 +285,58 @@ namespace MerelliPCX
             }
         }
 
+        Bitmap generateBitmap()
+        {
+            byte[] rgbValues;
+
+            var b = new Bitmap(Xsize, Ysize, PixelFormat.Format1bppIndexed);
+            var BoundsRect = new Rectangle(0, 0, Xsize, Ysize);
+            BitmapData bmpData = b.LockBits(BoundsRect, ImageLockMode.WriteOnly, b.PixelFormat);
+
+            if (Bytesperline % 4 == 0)
+            {
+                rgbValues = Imagevalues.ToArray();
+            }
+            else
+            {
+                int difference = bmpData.Stride - Bytesperline;
+                byte[] filler = new byte[difference];
+                for (int i = 0; i < difference; i++)
+                {
+                    filler[i] = 0x00;
+                }
+
+                for (int y = Ysize; y > 0; y--)
+                {
+                    Imagevalues.InsertRange(y * Bytesperline, filler);
+                }
+                rgbValues = Imagevalues.ToArray();
+            }
+
+            IntPtr ptr = bmpData.Scan0;
+            int bytes = bmpData.Stride * b.Height;
+            System.Runtime.InteropServices.Marshal.Copy(rgbValues, 0, ptr, bytes);
+            b.UnlockBits(bmpData);
+            return b;
+        }
+
         private void Fix()
         {
             try
             {
-                if (Nplanes == 1 && Bitsperpixel < 3)
+                if (Nplanes == 1 && Bitsperpixel == 2)
                 {
                     BitArray bits = new BitArray(Imagevalues.ToArray());
                     Imagevalues.Clear();
                     int planelinesize = (bits.Count / Ysize) / Nplanes;
                     int Position;
+
                     for (int y = 0; y < Ysize; y++)
                     {
-                        for (int x = 1; x < (Xsize * Bitsperpixel) + 1; x += Bitsperpixel)
+                        for (int x = 1; x < Xsize * Bitsperpixel + 1; x += Bitsperpixel)
                         {
                             Position = GetPosition(x, y, planelinesize);
-                            switch (Bitsperpixel)
-                            {
-                                case 1:
-                                    Imagevalues.Add(value(bits[Position], 0x1));
-                                    break;
-                                case 2:
-                                    Imagevalues.Add((byte)(value(bits[Position], 0x2) + value(bits[Position - 1], 0x1)));
-                                    break;
-                            }
+                            Imagevalues.Add((byte)(value(bits[Position], 0x2) + value(bits[Position - 1], 0x1)));
                         }
                     }
                 }
@@ -342,7 +401,7 @@ namespace MerelliPCX
                         ImagevaluesB.RemoveRange(i, Linepaddingsize);
                     }
                 }
-                else if (Nplanes == 1)
+                else if (Nplanes == 1 && Bitsperpixel != 1)
                 {
                     for (int i = Xsize; i < Xsize * Ysize; i += Xsize)
                     {
@@ -352,63 +411,64 @@ namespace MerelliPCX
             }
             catch
             {
+                System.Diagnostics.Debug.WriteLine("Error while interpreting the data and fixing padding.");
                 //throw new Exception(@"Error while interpreting the data and fixing padding.");
             }
         }
 
         private void Convert()
         {
-            try
+            if (Bitsperpixel != 1 || Nplanes != 1)
             {
-                for (int i = 0; i < Xsize * Ysize; i++)
+                try
                 {
-                    if (Nplanes == 1 && Paletteinfo == 2)
+                    for (int i = 0; i < Xsize * Ysize; i++)
                     {
-                        image[i] = Color.FromArgb(Imagevalues[i], Imagevalues[i], Imagevalues[i]);
-                    }
-                    if (Nplanes == 1 && Bitsperpixel == 1)
-                    {
-                        image[i] = Color.FromArgb(Imagevalues[i] * 255, Imagevalues[i] * 255, Imagevalues[i] * 255);
-                    }
-                    else if (Nplanes == 1 && Bitsperpixel == 2)
-                    {
-                        image[i] = Palette16[Imagevalues[i]];
-                    }
-                    else if (Nplanes == 1)
-                    {
-                        if (!palette256Empty)
-                        {
-                            image[i] = Palette256[Imagevalues[i]];
-                        }
-                        else if (!palette16Empty)
-                        {
-                            image[i] = Palette16[Imagevalues[i] / 16];
-                        }
-                        else
+                        if (Nplanes == 1 && Paletteinfo == 2)
                         {
                             image[i] = Color.FromArgb(Imagevalues[i], Imagevalues[i], Imagevalues[i]);
                         }
+                        else if (Nplanes == 1 && Bitsperpixel == 2)
+                        {
+                            image[i] = Palette16[Imagevalues[i]];
+                        }
+                        else if (Nplanes == 1)
+                        {
+                            if (!palette256Empty)
+                            {
+                                image[i] = Palette256[Imagevalues[i]];
+                            }
+                            else if (!palette16Empty)
+                            {
+                                image[i] = Palette16[Imagevalues[i] / 16];
+                            }
+                            else
+                            {
+                                image[i] = Color.FromArgb(Imagevalues[i], Imagevalues[i], Imagevalues[i]);
+                            }
+                        }
+                        else if ((Nplanes == 4 || Nplanes == 3) && Bitsperpixel == 1)
+                        {
+                            image[i] = Palette16[Imagevalues[i]];
+                        }
+                        else if (Nplanes == 3 && Paletteinfo == 1)
+                        {
+                            image[i] = Color.FromArgb(ImagevaluesR[i], ImagevaluesG[i], ImagevaluesB[i]);
+                        }
+                        int y = i / Xsize;
+                        int x = i - (Xsize * y);
+                        bmpImage.SetPixel(x, y, image[i]);
                     }
-                    else if (Nplanes == 4 && Bitsperpixel == 1)
-                    {
-                        image[i] = Palette16[Imagevalues[i]];
-                    }
-                    else if (Nplanes == 3 && Bitsperpixel == 1)
-                    {
-                        image[i] = Palette16[Imagevalues[i]];
-                    }
-                    else if (Nplanes == 3 && Paletteinfo == 1)
-                    {
-                        image[i] = Color.FromArgb(ImagevaluesR[i], ImagevaluesG[i], ImagevaluesB[i]);
-                    }
-                    int y = i / Xsize;
-                    int x = i - (Xsize * y);
-                    bmpImage.SetPixel(x, y, image[i]);
+                }
+                catch
+                {
+                    System.Diagnostics.Debug.WriteLine("Error while converting.");
+                    //throw new Exception(@"Error while converting.");
                 }
             }
-            catch
+            else
             {
-                //throw new Exception(@"Error while converting.");
+                bmpImage = generateBitmap();
             }
         }
 
@@ -457,6 +517,30 @@ namespace MerelliPCX
             else
             {
                 throw new Exception(@"Error loading file, file '" + strFileName + "' must have an extension of '.pcx' or 'pcc'.");
+            }
+        }
+
+
+        public PCXImage(byte[] PCXbytes) : this()
+        {
+            bmpImage = null;
+            Reset();
+            FileArray = PCXbytes;
+            Manufacturer = FileArray[0];
+            // make sure we have a .pcx file with the right header
+            if (Manufacturer == (int)Format.DEFAULT)
+            {
+                New();
+                Header();
+                Palette();
+                Decode();
+                Fix();
+                Convert();
+                Reset();
+            }
+            else
+            {
+                throw new Exception(@"Error loading bytes, the file cannot be recognized as Zsoft PCX image.");
             }
         }
     }
